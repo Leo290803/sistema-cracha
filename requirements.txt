@@ -1,0 +1,8 @@
+flask
+pandas
+PyPDF2
+reportlab
+openpyxl
+gunicornpip
+pymupdf
+pillow
