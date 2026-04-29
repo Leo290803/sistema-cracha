@@ -3,6 +3,6 @@ pandas
 PyPDF2
 reportlab
 openpyxl
-gunicornpip
 pymupdf
 pillow
+gunicorn
