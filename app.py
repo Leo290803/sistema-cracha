@@ -8,68 +8,108 @@ import fitz
 
 app = Flask(__name__)
 
-def get_categoria(ano, sexo):
-    if 2009 <= ano <= 2011:
-        cat = "15 a 17 anos"
-    elif 2012 <= ano <= 2014:
-        cat = "12 a 14 anos"
-    else:
-        cat = "FORA"
 
-    return f"{cat} - {sexo}"
+def normalizar_sexo(valor):
+    sexo = str(valor).strip().upper()
+
+    if sexo in ["M", "MASC", "MASCULINO"]:
+        return "MASCULINO"
+
+    if sexo in ["F", "FEM", "FEMININO"]:
+        return "FEMININO"
+
+    return None
+
+
+def calcular_categoria(data_nascimento):
+    nascimento = pd.to_datetime(data_nascimento, dayfirst=True, errors="coerce")
+
+    if pd.isna(nascimento):
+        return None
+
+    ano = nascimento.year
+
+    if 2009 <= ano <= 2011:
+        return "15 A 17 ANOS"
+
+    if 2012 <= ano <= 2014:
+        return "12 A 14 ANOS"
+
+    return None
+
+
+def encontrar_coluna(df, nomes_possiveis):
+    for col in df.columns:
+        col_limpa = str(col).strip().upper()
+        for nome in nomes_possiveis:
+            if nome in col_limpa:
+                return col
+    return None
+
+
+def montar_categoria(row, col_nome, col_sexo, col_data, linha_excel):
+    nome = str(row[col_nome]).strip() if col_nome else f"LINHA {linha_excel}"
+
+    sexo = normalizar_sexo(row[col_sexo])
+    categoria = calcular_categoria(row[col_data])
+
+    if not sexo:
+        raise Exception(f"Linha {linha_excel}: sexo inválido para {nome}")
+
+    if not categoria:
+        raise Exception(f"Linha {linha_excel}: data de nascimento inválida ou fora da categoria para {nome}")
+
+    return f"{categoria} {sexo}"
+
 
 def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primeira_pagina=False):
     df = pd.read_excel(excel_file)
     df.columns = df.columns.str.strip().str.upper()
 
-    col_data = None
-    col_sexo = None
+    col_nome = encontrar_coluna(df, ["NOME"])
+    col_sexo = encontrar_coluna(df, ["SEXO"])
+    col_data = encontrar_coluna(df, ["DATA NASCIMENTO", "NASCIMENTO", "DATA"])
 
-    for col in df.columns:
-        if "DATA" in col:
-            col_data = col
-        if "SEXO" in col:
-            col_sexo = col
+    if not col_nome:
+        raise Exception("Não encontrei a coluna NOME na planilha.")
 
-    if not col_data or not col_sexo:
-        raise Exception("Não encontrei DATA ou SEXO na planilha!")
+    if not col_sexo:
+        raise Exception("Não encontrei a coluna SEXO na planilha.")
+
+    if not col_data:
+        raise Exception("Não encontrei a coluna DATA NASCIMENTO na planilha.")
 
     reader = PdfReader(pdf_file)
     writer = PdfWriter()
 
-    total_paginas = 1 if somente_primeira_pagina else len(reader.pages)
+    total_paginas = 1 if somente_primeira_pagina else min(len(reader.pages), len(df))
+
+    erros = []
 
     for i in range(total_paginas):
+        row = df.iloc[i]
+        linha_excel = i + 2
+
+        try:
+            categoria_texto = montar_categoria(row, col_nome, col_sexo, col_data, linha_excel)
+        except Exception as e:
+            erros.append(str(e))
+            continue
+
         page = reader.pages[i]
 
         packet = io.BytesIO()
-
         largura = float(page.mediabox.width)
         altura = float(page.mediabox.height)
 
         can = canvas.Canvas(packet, pagesize=(largura, altura))
+        can.setFont("Helvetica-Bold", fonte)
 
-        # 1 atleta por página
-        idx = i
-
-        if idx < len(df):
-            row = df.iloc[idx]
-
-            try:
-                ano = pd.to_datetime(row[col_data], dayfirst=True).year
-                sexo = str(row[col_sexo]).strip().upper()
-                categoria = get_categoria(ano, sexo)
-
-                can.setFont("Helvetica-Bold", fonte)
-
-                can.saveState()
-                can.translate(pos_x, pos_y)
-                can.rotate(rotacao)
-                can.drawString(0, 0, categoria)
-                can.restoreState()
-
-            except:
-                pass
+        can.saveState()
+        can.translate(pos_x, pos_y)
+        can.rotate(rotacao)
+        can.drawCentredString(0, 0, categoria_texto)
+        can.restoreState()
 
         can.save()
         packet.seek(0)
@@ -81,15 +121,20 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
 
         writer.add_page(page)
 
+    if erros:
+        raise Exception("\n".join(erros[:20]))
+
     output = io.BytesIO()
     writer.write(output)
     output.seek(0)
 
     return output
 
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 @app.route("/preview", methods=["POST"])
 def preview():
@@ -135,6 +180,7 @@ def preview():
             "erro": str(e)
         })
 
+
 @app.route("/gerar", methods=["POST"])
 def gerar():
     try:
@@ -164,7 +210,8 @@ def gerar():
         )
 
     except Exception as e:
-        return f"Erro ao gerar PDF: {e}"
+        return f"Erro ao gerar PDF:<br><pre>{e}</pre>"
+
 
 if __name__ == "__main__":
     app.run(debug=True)
