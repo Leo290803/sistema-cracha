@@ -5,12 +5,23 @@ from reportlab.pdfgen import canvas
 import io
 import base64
 import fitz
+import unicodedata
+import re
 
 app = Flask(__name__)
 
 
+def limpar_texto(txt):
+    txt = str(txt).upper().strip()
+    txt = unicodedata.normalize("NFD", txt)
+    txt = "".join(c for c in txt if unicodedata.category(c) != "Mn")
+    txt = re.sub(r"[^A-Z0-9 ]", " ", txt)
+    txt = re.sub(r"\s+", " ", txt)
+    return txt.strip()
+
+
 def normalizar_sexo(valor):
-    sexo = str(valor).strip().upper()
+    sexo = limpar_texto(valor)
 
     if sexo in ["M", "MASC", "MASCULINO"]:
         return "MASCULINO"
@@ -40,15 +51,55 @@ def calcular_categoria(data_nascimento):
 
 def encontrar_coluna(df, nomes_possiveis):
     for col in df.columns:
-        col_limpa = str(col).strip().upper()
+        col_limpa = limpar_texto(col)
         for nome in nomes_possiveis:
-            if nome in col_limpa:
+            if limpar_texto(nome) in col_limpa:
                 return col
     return None
 
 
+def buscar_linha_por_nome(df, texto_pagina, col_nome):
+    texto_pagina_limpo = limpar_texto(texto_pagina)
+
+    melhor_idx = None
+    melhor_row = None
+    melhor_pontuacao = 0
+
+    for idx, row in df.iterrows():
+        nome_excel = limpar_texto(row[col_nome])
+
+        if not nome_excel:
+            continue
+
+        partes = nome_excel.split()
+
+        if len(partes) < 2:
+            continue
+
+        acertos = 0
+
+        for parte in partes:
+            if parte in texto_pagina_limpo:
+                acertos += 1
+
+        pontuacao = acertos / len(partes)
+
+        primeiro_nome_ok = partes[0] in texto_pagina_limpo
+        segundo_nome_ok = partes[1] in texto_pagina_limpo
+
+        if primeiro_nome_ok and segundo_nome_ok and pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor_idx = idx
+            melhor_row = row
+
+    if melhor_pontuacao >= 0.50:
+        return melhor_idx, melhor_row
+
+    return None, None
+
+
 def montar_categoria(row, col_nome, col_sexo, col_data, linha_excel):
-    nome = str(row[col_nome]).strip() if col_nome else f"LINHA {linha_excel}"
+    nome = str(row[col_nome]).strip()
 
     sexo = normalizar_sexo(row[col_sexo])
     categoria = calcular_categoria(row[col_data])
@@ -57,7 +108,9 @@ def montar_categoria(row, col_nome, col_sexo, col_data, linha_excel):
         raise Exception(f"Linha {linha_excel}: sexo inválido para {nome}")
 
     if not categoria:
-        raise Exception(f"Linha {linha_excel}: data de nascimento inválida ou fora da categoria para {nome}")
+        raise Exception(
+            f"Linha {linha_excel}: data de nascimento inválida ou fora da categoria para {nome}"
+        )
 
     return f"{categoria} {sexo}"
 
@@ -68,7 +121,10 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
 
     col_nome = encontrar_coluna(df, ["NOME"])
     col_sexo = encontrar_coluna(df, ["SEXO"])
-    col_data = encontrar_coluna(df, ["DATA NASCIMENTO", "NASCIMENTO", "DATA"])
+    col_data = encontrar_coluna(
+        df,
+        ["DATA NASCIMENTO", "DATA DE NASCIMENTO", "NASCIMENTO", "DATA"]
+    )
 
     if not col_nome:
         raise Exception("Não encontrei a coluna NOME na planilha.")
@@ -82,21 +138,27 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
     reader = PdfReader(pdf_file)
     writer = PdfWriter()
 
-    total_paginas = 1 if somente_primeira_pagina else min(len(reader.pages), len(df))
+    total_paginas = 1 if somente_primeira_pagina else len(reader.pages)
 
     erros = []
 
     for i in range(total_paginas):
-        row = df.iloc[i]
-        linha_excel = i + 2
+        page = reader.pages[i]
+
+        texto_pagina = page.extract_text() or ""
+        idx_excel, row = buscar_linha_por_nome(df, texto_pagina, col_nome)
+
+        if row is None:
+            erros.append(f"Página {i + 1}: não encontrei o atleta do crachá na planilha.")
+            continue
+
+        linha_excel = idx_excel + 2
 
         try:
             categoria_texto = montar_categoria(row, col_nome, col_sexo, col_data, linha_excel)
         except Exception as e:
             erros.append(str(e))
             continue
-
-        page = reader.pages[i]
 
         packet = io.BytesIO()
         largura = float(page.mediabox.width)
@@ -122,7 +184,7 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
         writer.add_page(page)
 
     if erros:
-        raise Exception("\n".join(erros[:20]))
+        raise Exception("\n".join(erros[:30]))
 
     output = io.BytesIO()
     writer.write(output)
