@@ -1088,8 +1088,8 @@ def preview():
         doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
         page = doc[0]
 
-        # Baixa resolução para evitar SIGKILL / falta de memória
-        pix = page.get_pixmap(matrix=fitz.Matrix(0.65, 0.65), alpha=False)
+        # Prévia bem leve para Render Free. Não altera o PDF final.
+        pix = page.get_pixmap(matrix=fitz.Matrix(0.35, 0.35), alpha=False)
 
         img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         doc.close()
@@ -1129,7 +1129,7 @@ def preview_manual():
 
         doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
         page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(0.65, 0.65), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(0.35, 0.35), alpha=False)
         img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         doc.close()
 
