@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, send_file, jsonify, redirect
+from flask import Flask, request, send_file, jsonify, redirect
 import pandas as pd
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -7,104 +7,14 @@ import base64
 import fitz
 import unicodedata
 import re
-import sqlite3
-from datetime import datetime
+import html
 
 app = Flask(__name__)
 
-DB = "validacao_crachas.db"
 
+def h(valor):
+    return html.escape(str(valor or ""))
 
-# =========================
-# BANCO DE DADOS
-# =========================
-
-def init_db():
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS atletas (
-            codigo_qr TEXT PRIMARY KEY,
-            nome TEXT,
-            categoria TEXT,
-            pagina INTEGER,
-            escola TEXT,
-            status TEXT DEFAULT 'PENDENTE',
-            checkin_hora TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def salvar_atleta(codigo_qr, nome, categoria, pagina, escola=""):
-    if not codigo_qr:
-        return
-
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT OR REPLACE INTO atletas
-        (codigo_qr, nome, categoria, pagina, escola, status, checkin_hora)
-        VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            COALESCE((SELECT status FROM atletas WHERE codigo_qr = ?), 'PENDENTE'),
-            COALESCE((SELECT checkin_hora FROM atletas WHERE codigo_qr = ?), NULL)
-        )
-    """, (codigo_qr, nome, categoria, pagina, escola, codigo_qr, codigo_qr))
-
-    conn.commit()
-    conn.close()
-
-
-def buscar_atleta_por_codigo(codigo_qr):
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM atletas WHERE codigo_qr = ?", (codigo_qr,))
-    atleta = cur.fetchone()
-
-    conn.close()
-    return atleta
-
-
-def registrar_checkin(codigo_qr):
-    atleta = buscar_atleta_por_codigo(codigo_qr)
-
-    if not atleta:
-        return False, "ATLETA NÃO ENCONTRADO"
-
-    if atleta["status"] == "ENTROU":
-        return False, "JÁ ENTROU"
-
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE atletas
-        SET status = 'ENTROU', checkin_hora = ?
-        WHERE codigo_qr = ?
-    """, (agora, codigo_qr))
-
-    conn.commit()
-    conn.close()
-
-    return True, "CHECK-IN REALIZADO"
-
-
-# =========================
-# FUNÇÕES DE TEXTO
-# =========================
 
 def limpar_texto(txt):
     txt = str(txt).upper().strip()
@@ -113,6 +23,64 @@ def limpar_texto(txt):
     txt = re.sub(r"[^A-Z0-9 ]", " ", txt)
     txt = re.sub(r"\s+", " ", txt)
     return txt.strip()
+
+
+def valor_linha(row, coluna, padrao=""):
+    if not coluna:
+        return padrao
+    valor = row.get(coluna, padrao)
+    if pd.isna(valor):
+        return padrao
+    valor = str(valor).strip()
+    if valor.lower() == "nan":
+        return padrao
+    return valor
+
+
+def valor_valido(valor):
+    texto = limpar_texto(valor)
+    return bool(texto and texto not in ["---", "-", "NA", "NAN", "NONE", "NULL"])
+
+
+def encontrar_coluna(df, nomes_possiveis):
+    for col in df.columns:
+        col_limpa = limpar_texto(col)
+        for nome in nomes_possiveis:
+            if limpar_texto(nome) in col_limpa:
+                return col
+    return None
+
+
+def normalizar_lista_escolas(valores):
+    escolas = []
+
+    if not valores:
+        return escolas
+
+    if isinstance(valores, list):
+        partes = valores
+    else:
+        partes = re.split(r"[\n,;]+", str(valores))
+
+    for item in partes:
+        escola = limpar_texto(item)
+        if escola:
+            escolas.append(escola)
+
+    return escolas
+
+
+def escola_permitida(escola, escolas_escolhidas):
+    if not escolas_escolhidas:
+        return True
+
+    escola_limpa = limpar_texto(escola)
+
+    for escolhida in escolas_escolhidas:
+        if escolhida == escola_limpa:
+            return True
+
+    return False
 
 
 def normalizar_sexo(valor):
@@ -144,13 +112,14 @@ def calcular_categoria(data_nascimento):
     return None
 
 
-def encontrar_coluna(df, nomes_possiveis):
-    for col in df.columns:
-        col_limpa = limpar_texto(col)
-        for nome in nomes_possiveis:
-            if limpar_texto(nome) in col_limpa:
-                return col
-    return None
+def texto_pagina_fitz(pdf_bytes, pagina_index):
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        texto = doc[pagina_index].get_text()
+        doc.close()
+        return texto or ""
+    except Exception:
+        return ""
 
 
 def buscar_linha_por_nome(df, texto_pagina, col_nome):
@@ -171,12 +140,7 @@ def buscar_linha_por_nome(df, texto_pagina, col_nome):
         if len(partes) < 2:
             continue
 
-        acertos = 0
-
-        for parte in partes:
-            if parte in texto_pagina_limpo:
-                acertos += 1
-
+        acertos = sum(1 for parte in partes if parte in texto_pagina_limpo)
         pontuacao = acertos / len(partes)
 
         primeiro_nome_ok = partes[0] in texto_pagina_limpo
@@ -193,25 +157,38 @@ def buscar_linha_por_nome(df, texto_pagina, col_nome):
     return None, None
 
 
-def extrair_codigo_qr_do_texto(texto_pagina):
-    texto = limpar_texto(texto_pagina)
-    partes = texto.split()
-
-    candidatos = []
-
-    for parte in partes:
-        if parte.isdigit() and len(parte) >= 6:
-            candidatos.append(parte)
-
+def extrair_numero_credencial(texto_pagina):
+    candidatos = re.findall(r"\b\d{6,20}\b", str(texto_pagina))
     if candidatos:
         return candidatos[0]
+    return ""
 
-    return None
+
+def identificar_tipo_pessoa(row, col_funcao=None, col_tipo_usuario=None, texto_pagina=""):
+    funcao = valor_linha(row, col_funcao, "")
+    tipo_usuario = valor_linha(row, col_tipo_usuario, "")
+    texto_pdf = limpar_texto(texto_pagina)
+
+    if valor_valido(funcao):
+        return limpar_texto(funcao)
+
+    if "CHEFE DE DELEGACAO" in texto_pdf:
+        return "CHEFE DE DELEGAÇÃO"
+
+    if "TECNICO" in texto_pdf:
+        return "TÉCNICO"
+
+    if "OFICIAL" in texto_pdf:
+        return "OFICIAL"
+
+    if "PRESTADOR" in limpar_texto(tipo_usuario):
+        return "DIRIGENTE"
+
+    return "ATLETA"
 
 
 def montar_categoria(row, col_nome, col_sexo, col_data, linha_excel):
     nome = str(row[col_nome]).strip()
-
     sexo = normalizar_sexo(row[col_sexo])
     categoria = calcular_categoria(row[col_data])
 
@@ -219,31 +196,37 @@ def montar_categoria(row, col_nome, col_sexo, col_data, linha_excel):
         raise Exception(f"Linha {linha_excel}: sexo inválido para {nome}")
 
     if not categoria:
-        raise Exception(
-            f"Linha {linha_excel}: data de nascimento inválida ou fora da categoria para {nome}"
-        )
+        raise Exception(f"Linha {linha_excel}: data de nascimento inválida ou fora da categoria para {nome}")
 
     return f"{categoria} {sexo}"
 
 
-# =========================
-# GERAR PDF E BASE
-# =========================
+def montar_texto_cracha(
+    row,
+    col_nome,
+    col_sexo,
+    col_data,
+    col_escola,
+    col_funcao,
+    col_tipo_usuario,
+    linha_excel,
+    texto_pagina="",
+    texto_atleta="categoria"
+):
+    tipo_pessoa = identificar_tipo_pessoa(row, col_funcao, col_tipo_usuario, texto_pagina)
+    escola = valor_linha(row, col_escola, "")
 
-def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primeira_pagina=False):
-    df = pd.read_excel(excel_file)
-    df.columns = df.columns.str.strip().str.upper()
+    if tipo_pessoa != "ATLETA":
+        if not valor_valido(escola):
+            nome = str(row[col_nome]).strip()
+            raise Exception(f"Linha {linha_excel}: escola inválida para {nome}")
+        return escola.upper(), tipo_pessoa, escola
 
-    col_nome = encontrar_coluna(df, ["NOME"])
-    col_sexo = encontrar_coluna(df, ["SEXO"])
-    col_data = encontrar_coluna(
-        df,
-        ["DATA NASCIMENTO", "DATA DE NASCIMENTO", "NASCIMENTO", "DATA"]
-    )
-    col_escola = encontrar_coluna(df, ["ESCOLA"])
-
-    if not col_nome:
-        raise Exception("Não encontrei a coluna NOME na planilha.")
+    if texto_atleta == "escola":
+        if not valor_valido(escola):
+            nome = str(row[col_nome]).strip()
+            raise Exception(f"Linha {linha_excel}: escola inválida para {nome}")
+        return escola.upper(), tipo_pessoa, escola
 
     if not col_sexo:
         raise Exception("Não encontrei a coluna SEXO na planilha.")
@@ -251,43 +234,157 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
     if not col_data:
         raise Exception("Não encontrei a coluna DATA NASCIMENTO na planilha.")
 
-    reader = PdfReader(pdf_file)
-    writer = PdfWriter()
+    categoria = montar_categoria(row, col_nome, col_sexo, col_data, linha_excel)
+    return categoria, tipo_pessoa, escola
 
-    total_paginas = 1 if somente_primeira_pagina else len(reader.pages)
 
-    erros = []
+def carregar_planilha(excel_file):
+    df = pd.read_excel(excel_file, dtype=str)
+    df.columns = df.columns.str.strip().str.upper()
 
-    for i in range(total_paginas):
-        page = reader.pages[i]
+    col_nome = encontrar_coluna(df, ["NOME"])
+    col_sexo = encontrar_coluna(df, ["SEXO"])
+    col_data = encontrar_coluna(df, ["DATA NASCIMENTO", "DATA DE NASCIMENTO", "NASCIMENTO", "DATA"])
+    col_escola = encontrar_coluna(df, ["ESCOLA", "UNIDADE ESCOLAR", "INSTITUICAO", "INSTITUIÇÃO"])
+    col_funcao = encontrar_coluna(df, ["FUNCAO", "FUNÇÃO", "CARGO"])
+    col_tipo_usuario = encontrar_coluna(df, ["TIPO USUARIO", "TIPO USUÁRIO", "TIPO"])
+    col_cpf = encontrar_coluna(df, ["CPF"])
 
-        texto_pagina = page.extract_text() or ""
-        codigo_qr = extrair_codigo_qr_do_texto(texto_pagina)
+    if not col_nome:
+        raise Exception("Não encontrei a coluna NOME na planilha.")
+
+    if not col_escola:
+        raise Exception("Não encontrei a coluna ESCOLA na planilha.")
+
+    return {
+        "df": df,
+        "col_nome": col_nome,
+        "col_sexo": col_sexo,
+        "col_data": col_data,
+        "col_escola": col_escola,
+        "col_funcao": col_funcao,
+        "col_tipo_usuario": col_tipo_usuario,
+        "col_cpf": col_cpf
+    }
+
+
+def analisar_escolas_pdf(excel_file, pdf_file):
+    dados = carregar_planilha(excel_file)
+    df = dados["df"]
+    col_nome = dados["col_nome"]
+    col_escola = dados["col_escola"]
+
+    pdf_bytes = pdf_file.read()
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    escolas = {}
+    nao_encontrados = []
+
+    for i, page in enumerate(reader.pages):
+        texto_pypdf = page.extract_text() or ""
+        texto_fitz = texto_pagina_fitz(pdf_bytes, i)
+        texto_pagina = texto_pypdf + "\n" + texto_fitz
 
         idx_excel, row = buscar_linha_por_nome(df, texto_pagina, col_nome)
 
         if row is None:
-            erros.append(f"Página {i + 1}: não encontrei o atleta do crachá na planilha.")
+            nao_encontrados.append(i + 1)
+            continue
+
+        escola_original = valor_linha(row, col_escola, "SEM ESCOLA")
+        escola_limpa = limpar_texto(escola_original)
+
+        if not escola_limpa:
+            escola_limpa = "SEM ESCOLA"
+            escola_original = "SEM ESCOLA"
+
+        if escola_limpa not in escolas:
+            escolas[escola_limpa] = {
+                "nome": escola_original.upper(),
+                "valor": escola_limpa,
+                "quantidade": 0,
+                "paginas": []
+            }
+
+        escolas[escola_limpa]["quantidade"] += 1
+        escolas[escola_limpa]["paginas"].append(i + 1)
+
+    lista = sorted(escolas.values(), key=lambda x: x["nome"])
+
+    return {
+        "escolas": lista,
+        "total_escolas": len(lista),
+        "total_crachas_identificados": sum(e["quantidade"] for e in lista),
+        "nao_encontrados": nao_encontrados
+    }
+
+
+def criar_pdf(
+    excel_file,
+    pdf_file,
+    pos_x,
+    pos_y,
+    rotacao,
+    fonte,
+    somente_primeira_pagina=False,
+    texto_atleta="categoria",
+    escolas_selecionadas=None
+):
+    dados = carregar_planilha(excel_file)
+
+    df = dados["df"]
+    col_nome = dados["col_nome"]
+    col_sexo = dados["col_sexo"]
+    col_data = dados["col_data"]
+    col_escola = dados["col_escola"]
+    col_funcao = dados["col_funcao"]
+    col_tipo_usuario = dados["col_tipo_usuario"]
+
+    escolas_escolhidas = normalizar_lista_escolas(escolas_selecionadas)
+
+    pdf_bytes = pdf_file.read()
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+
+    erros = []
+    paginas_adicionadas = 0
+
+    for i in range(len(reader.pages)):
+        page = reader.pages[i]
+
+        texto_pypdf = page.extract_text() or ""
+        texto_fitz = texto_pagina_fitz(pdf_bytes, i)
+        texto_pagina = texto_pypdf + "\n" + texto_fitz
+
+        idx_excel, row = buscar_linha_por_nome(df, texto_pagina, col_nome)
+
+        if row is None:
+            erros.append(f"Página {i + 1}: não encontrei a pessoa do crachá na planilha.")
+            continue
+
+        escola = valor_linha(row, col_escola, "")
+
+        if not escola_permitida(escola, escolas_escolhidas):
             continue
 
         linha_excel = idx_excel + 2
 
         try:
-            categoria_texto = montar_categoria(row, col_nome, col_sexo, col_data, linha_excel)
+            texto_cracha, tipo_pessoa, escola = montar_texto_cracha(
+                row=row,
+                col_nome=col_nome,
+                col_sexo=col_sexo,
+                col_data=col_data,
+                col_escola=col_escola,
+                col_funcao=col_funcao,
+                col_tipo_usuario=col_tipo_usuario,
+                linha_excel=linha_excel,
+                texto_pagina=texto_pagina,
+                texto_atleta=texto_atleta
+            )
         except Exception as e:
             erros.append(str(e))
             continue
-
-        nome = str(row[col_nome]).strip()
-        escola = str(row[col_escola]).strip() if col_escola else ""
-
-        salvar_atleta(
-            codigo_qr=codigo_qr,
-            nome=nome,
-            categoria=categoria_texto,
-            pagina=i + 1,
-            escola=escola
-        )
 
         packet = io.BytesIO()
         largura = float(page.mediabox.width)
@@ -295,11 +392,12 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
 
         can = canvas.Canvas(packet, pagesize=(largura, altura))
         can.setFont("Helvetica-Bold", fonte)
+        can.setFillColorRGB(1, 1, 1)
 
         can.saveState()
         can.translate(pos_x, pos_y)
         can.rotate(rotacao)
-        can.drawCentredString(0, 0, categoria_texto)
+        can.drawCentredString(0, 0, texto_cracha)
         can.restoreState()
 
         can.save()
@@ -311,9 +409,15 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
             page.merge_page(overlay.pages[0])
 
         writer.add_page(page)
+        paginas_adicionadas += 1
 
-    if erros:
-        raise Exception("\n".join(erros[:30]))
+        if somente_primeira_pagina:
+            break
+
+    if paginas_adicionadas == 0:
+        if escolas_escolhidas:
+            raise Exception("Nenhum crachá encontrado para as escolas selecionadas.")
+        raise Exception("Nenhuma página foi gerada.")
 
     output = io.BytesIO()
     writer.write(output)
@@ -322,75 +426,528 @@ def criar_pdf(excel_file, pdf_file, pos_x, pos_y, rotacao, fonte, somente_primei
     return output
 
 
-def montar_base_validacao(excel_file, pdf_file):
-    df = pd.read_excel(excel_file)
-    df.columns = df.columns.str.strip().str.upper()
+def criar_pdf_manual(pdf_file, texto_manual, pos_x, pos_y, rotacao, fonte, somente_primeira_pagina=False):
+    texto_manual = str(texto_manual or "").strip()
 
-    col_nome = encontrar_coluna(df, ["NOME"])
-    col_sexo = encontrar_coluna(df, ["SEXO"])
-    col_data = encontrar_coluna(df, ["DATA NASCIMENTO", "DATA DE NASCIMENTO", "NASCIMENTO", "DATA"])
-    col_escola = encontrar_coluna(df, ["ESCOLA"])
+    if not texto_manual:
+        raise Exception("Digite o nome da escola ou texto que deseja colocar no crachá.")
 
-    reader = PdfReader(pdf_file)
+    pdf_bytes = pdf_file.read()
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
 
-    base = []
-    erros = []
+    paginas_adicionadas = 0
 
-    for i, page in enumerate(reader.pages):
-        texto_pagina = page.extract_text() or ""
+    for i in range(len(reader.pages)):
+        page = reader.pages[i]
 
-        codigo_qr = extrair_codigo_qr_do_texto(texto_pagina)
-        idx_excel, row = buscar_linha_por_nome(df, texto_pagina, col_nome)
+        packet = io.BytesIO()
+        largura = float(page.mediabox.width)
+        altura = float(page.mediabox.height)
 
-        if row is None:
-            erros.append({
-                "pagina": i + 1,
-                "codigo_qr": codigo_qr,
-                "erro": "Atleta não encontrado na planilha"
-            })
-            continue
+        can = canvas.Canvas(packet, pagesize=(largura, altura))
+        can.setFont("Helvetica-Bold", fonte)
+        can.setFillColorRGB(1, 1, 1)
 
-        linha_excel = idx_excel + 2
+        can.saveState()
+        can.translate(pos_x, pos_y)
+        can.rotate(rotacao)
+        can.drawCentredString(0, 0, texto_manual.upper())
+        can.restoreState()
 
-        try:
-            categoria = montar_categoria(row, col_nome, col_sexo, col_data, linha_excel)
-        except Exception as e:
-            erros.append({
-                "pagina": i + 1,
-                "codigo_qr": codigo_qr,
-                "erro": str(e)
-            })
-            continue
+        can.save()
+        packet.seek(0)
 
-        nome = str(row[col_nome]).strip()
-        escola = str(row[col_escola]).strip() if col_escola else ""
+        overlay = PdfReader(packet)
 
-        salvar_atleta(
-            codigo_qr=codigo_qr,
-            nome=nome,
-            categoria=categoria,
-            pagina=i + 1,
-            escola=escola
-        )
+        if len(overlay.pages) > 0:
+            page.merge_page(overlay.pages[0])
 
-        base.append({
-            "pagina": i + 1,
-            "codigo_qr": codigo_qr,
-            "nome": nome,
-            "categoria": categoria,
-            "escola": escola
-        })
+        writer.add_page(page)
+        paginas_adicionadas += 1
 
-    return base, erros
+        if somente_primeira_pagina:
+            break
+
+    if paginas_adicionadas == 0:
+        raise Exception("Nenhuma página foi gerada.")
+
+    output = io.BytesIO()
+    writer.write(output)
+    output.seek(0)
+
+    return output
 
 
-# =========================
-# ROTAS PRINCIPAIS
-# =========================
+def layout_home():
+    return """
+    <!doctype html>
+    <html lang="pt-br">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Gerador de Crachás</title>
+        <style>
+            * { box-sizing: border-box; }
+
+            body {
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: #f3f4f6;
+                color: #111827;
+            }
+
+            .top {
+                background: linear-gradient(135deg, #0f172a, #166534);
+                color: white;
+                padding: 24px;
+                text-align: center;
+            }
+
+            .top h1 {
+                margin: 0;
+                font-size: 32px;
+            }
+
+            .top p {
+                margin: 8px 0 0;
+                opacity: .9;
+            }
+
+            .wrap {
+                max-width: 1250px;
+                margin: 30px auto;
+                padding: 0 16px;
+                display: grid;
+                grid-template-columns: 500px 1fr;
+                gap: 20px;
+            }
+
+            .card {
+                background: white;
+                border-radius: 18px;
+                padding: 24px;
+                box-shadow: 0 10px 30px rgba(0,0,0,.08);
+                border: 1px solid #e5e7eb;
+            }
+
+            label {
+                font-weight: bold;
+                display: block;
+                margin-top: 16px;
+                margin-bottom: 6px;
+            }
+
+            input, select {
+                width: 100%;
+                padding: 11px;
+                border: 1px solid #cbd5e1;
+                border-radius: 10px;
+                font-size: 15px;
+            }
+
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }
+
+            button {
+                width: 100%;
+                padding: 13px;
+                border: 0;
+                border-radius: 12px;
+                background: #16a34a;
+                color: white;
+                font-weight: bold;
+                font-size: 15px;
+                cursor: pointer;
+                margin-top: 12px;
+            }
+
+            button.secondary { background: #2563eb; }
+            button.dark { background: #0f172a; }
+            button.orange { background: #f97316; }
+            button.purple { background: #7c3aed; }
+
+            .help {
+                background: #ecfdf5;
+                border: 1px solid #bbf7d0;
+                border-radius: 14px;
+                padding: 14px;
+                color: #166534;
+                font-size: 14px;
+                line-height: 1.5;
+            }
+
+            .help.manual {
+                background: #f5f3ff;
+                border-color: #ddd6fe;
+                color: #5b21b6;
+            }
+
+            .preview-box {
+                min-height: 420px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #f8fafc;
+                border: 2px dashed #cbd5e1;
+                border-radius: 16px;
+                overflow: auto;
+                padding: 15px;
+            }
+
+            .preview-box img {
+                max-width: 100%;
+                border-radius: 12px;
+                box-shadow: 0 8px 25px rgba(0,0,0,.15);
+            }
+
+            .erro {
+                white-space: pre-wrap;
+                background: #fee2e2;
+                color: #991b1b;
+                padding: 14px;
+                border-radius: 12px;
+                font-weight: bold;
+            }
+
+            .ok {
+                white-space: pre-wrap;
+                background: #dcfce7;
+                color: #166534;
+                padding: 14px;
+                border-radius: 12px;
+                font-weight: bold;
+            }
+
+            .escolas-box {
+                margin-top: 18px;
+                border: 1px solid #e5e7eb;
+                border-radius: 14px;
+                padding: 14px;
+                background: #f8fafc;
+                max-height: 430px;
+                overflow: auto;
+            }
+
+            .escola-item {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                background: white;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 10px;
+                margin-bottom: 8px;
+            }
+
+            .escola-item input {
+                width: auto;
+                margin-top: 3px;
+            }
+
+            .escola-nome {
+                font-weight: bold;
+                font-size: 14px;
+            }
+
+            .escola-qtd {
+                color: #64748b;
+                font-size: 13px;
+                margin-top: 3px;
+            }
+
+            .linha-botoes {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+            }
+
+            .mini {
+                font-size: 13px;
+                padding: 10px;
+                margin-top: 8px;
+            }
+
+            hr {
+                border: none;
+                border-top: 1px solid #e5e7eb;
+                margin: 28px 0;
+            }
+
+            @media (max-width: 900px) {
+                .wrap { grid-template-columns: 1fr; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="top">
+            <h1>Gerador de Crachás</h1>
+            <p>Filtro por escola + modo manual para técnico/dirigente</p>
+        </div>
+
+        <div class="wrap">
+            <div class="card">
+                <h2>Modo Normal: Excel + PDF</h2>
+
+                <div class="help">
+                    1. Envie a planilha Excel e o PDF.<br>
+                    2. Clique em <b>Ler escolas do PDF</b>.<br>
+                    3. Marque as escolas desejadas.<br>
+                    4. Gere o PDF final somente com essas escolas.
+                </div>
+
+                <form id="formulario" action="/gerar" method="POST" enctype="multipart/form-data">
+                    <label>Planilha Excel</label>
+                    <input type="file" name="excel" accept=".xlsx,.xls">
+
+                    <label>PDF dos crachás</label>
+                    <input type="file" name="pdf" accept=".pdf">
+
+                    <label>Texto para ATLETA</label>
+                    <select name="texto_atleta">
+                        <option value="categoria" selected>Categoria</option>
+                        <option value="escola">Escola</option>
+                    </select>
+
+                    <div class="grid">
+                        <div>
+                            <label>Posição X</label>
+                            <input type="number" name="pos_x" value="118">
+                        </div>
+
+                        <div>
+                            <label>Posição Y</label>
+                            <input type="number" name="pos_y" value="300">
+                        </div>
+
+                        <div>
+                            <label>Rotação</label>
+                            <input type="number" name="rotacao" value="90">
+                        </div>
+
+                        <div>
+                            <label>Tamanho da fonte</label>
+                            <input type="number" name="fonte" value="10">
+                        </div>
+                    </div>
+
+                    <button type="button" class="dark" onclick="analisarEscolas()">Ler escolas do PDF</button>
+
+                    <div id="areaEscolas" class="escolas-box" style="display:none;"></div>
+
+                    <button type="button" class="secondary" onclick="preview()">Pré-visualizar primeira página selecionada</button>
+                    <button type="submit">Gerar PDF Final</button>
+                    <button type="button" class="orange" onclick="exportarCredenciais()">Exportar Excel CPF + Credencial</button>
+                </form>
+
+                <hr>
+
+                <h2>Modo Técnico / Manual: só PDF</h2>
+
+                <div class="help manual">
+                    Use quando você tiver somente o PDF, sem Excel.
+                    Digite o nome da escola ou qualquer texto, e o sistema coloca em todos os crachás.
+                </div>
+
+                <form id="formManual" action="/gerar-manual" method="POST" enctype="multipart/form-data">
+                    <label>PDF dos crachás</label>
+                    <input type="file" name="pdf_manual" accept=".pdf" required>
+
+                    <label>Nome da escola ou texto manual</label>
+                    <input type="text" name="texto_manual" placeholder="Ex: ESCOLA ESTADUAL TESTE" required>
+
+                    <div class="grid">
+                        <div>
+                            <label>Posição X</label>
+                            <input type="number" name="pos_x_manual" value="118">
+                        </div>
+
+                        <div>
+                            <label>Posição Y</label>
+                            <input type="number" name="pos_y_manual" value="300">
+                        </div>
+
+                        <div>
+                            <label>Rotação</label>
+                            <input type="number" name="rotacao_manual" value="90">
+                        </div>
+
+                        <div>
+                            <label>Tamanho da fonte</label>
+                            <input type="number" name="fonte_manual" value="10">
+                        </div>
+                    </div>
+
+                    <button type="button" class="purple" onclick="previewManual()">Pré-visualizar modo manual</button>
+                    <button type="submit" class="orange">Gerar PDF Manual</button>
+                </form>
+            </div>
+
+            <div class="card">
+                <h2>Pré-visualização</h2>
+                <div id="preview" class="preview-box">
+                    A prévia aparecerá aqui.
+                </div>
+            </div>
+        </div>
+
+        <script>
+            function getForm() {
+                return document.getElementById("formulario");
+            }
+
+            function getPreview() {
+                return document.getElementById("preview");
+            }
+
+            function marcarTodas(valor) {
+                document.querySelectorAll(".check-escola").forEach(cb => cb.checked = valor);
+            }
+
+            async function analisarEscolas() {
+                const form = getForm();
+                const dados = new FormData(form);
+                const area = document.getElementById("areaEscolas");
+
+                area.style.display = "block";
+                area.innerHTML = '<div class="ok">Lendo PDF e identificando escolas...</div>';
+
+                try {
+                    const resp = await fetch("/analisar-escolas", {
+                        method: "POST",
+                        body: dados
+                    });
+
+                    const data = await resp.json();
+
+                    if (!data.ok) {
+                        area.innerHTML = '<div class="erro">' + data.erro + '</div>';
+                        return;
+                    }
+
+                    let html = '';
+                    html += '<h3>Escolas encontradas</h3>';
+                    html += '<div class="ok">';
+                    html += 'Total de escolas: ' + data.total_escolas + '\\n';
+                    html += 'Crachás identificados: ' + data.total_crachas_identificados;
+                    if (data.nao_encontrados.length > 0) {
+                        html += '\\nPáginas sem localizar na planilha: ' + data.nao_encontrados.join(", ");
+                    }
+                    html += '</div>';
+
+                    html += '<div class="linha-botoes">';
+                    html += '<button type="button" class="mini secondary" onclick="marcarTodas(true)">Selecionar todas</button>';
+                    html += '<button type="button" class="mini orange" onclick="marcarTodas(false)">Desmarcar todas</button>';
+                    html += '</div>';
+
+                    data.escolas.forEach(function(escola) {
+                        html += '<label class="escola-item">';
+                        html += '<input class="check-escola" type="checkbox" name="escolas_selecionadas" value="' + escola.valor + '">';
+                        html += '<div>';
+                        html += '<div class="escola-nome">' + escola.nome + '</div>';
+                        html += '<div class="escola-qtd">' + escola.quantidade + ' crachá(s)</div>';
+                        html += '</div>';
+                        html += '</label>';
+                    });
+
+                    area.innerHTML = html;
+
+                } catch (e) {
+                    area.innerHTML = '<div class="erro">Erro ao analisar escolas.</div>';
+                }
+            }
+
+            async function preview() {
+                const form = getForm();
+                const dados = new FormData(form);
+                const area = getPreview();
+
+                area.innerHTML = "Gerando prévia...";
+
+                try {
+                    const resp = await fetch("/preview", {
+                        method: "POST",
+                        body: dados
+                    });
+
+                    const data = await resp.json();
+
+                    if (data.ok) {
+                        area.innerHTML = '<img src="' + data.imagem + '">';
+                    } else {
+                        area.innerHTML = '<div class="erro">' + data.erro + '</div>';
+                    }
+                } catch (e) {
+                    area.innerHTML = '<div class="erro">Erro ao gerar prévia.</div>';
+                }
+            }
+
+            async function previewManual() {
+                const form = document.getElementById("formManual");
+                const dados = new FormData(form);
+                const area = getPreview();
+
+                area.innerHTML = "Gerando prévia manual...";
+
+                try {
+                    const resp = await fetch("/preview-manual", {
+                        method: "POST",
+                        body: dados
+                    });
+
+                    const data = await resp.json();
+
+                    if (data.ok) {
+                        area.innerHTML = '<img src="' + data.imagem + '">';
+                    } else {
+                        area.innerHTML = '<div class="erro">' + data.erro + '</div>';
+                    }
+                } catch (e) {
+                    area.innerHTML = '<div class="erro">Erro ao gerar prévia manual.</div>';
+                }
+            }
+
+            function exportarCredenciais() {
+                const form = getForm();
+                form.action = "/gerar-excel-credenciais";
+                form.submit();
+                form.action = "/gerar";
+            }
+        </script>
+    </body>
+    </html>
+    """
+
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return layout_home()
+
+
+@app.route("/analisar-escolas", methods=["POST"])
+def analisar_escolas():
+    try:
+        excel = request.files["excel"]
+        pdf = request.files["pdf"]
+
+        resultado = analisar_escolas_pdf(excel, pdf)
+
+        return jsonify({
+            "ok": True,
+            "escolas": resultado["escolas"],
+            "total_escolas": resultado["total_escolas"],
+            "total_crachas_identificados": resultado["total_crachas_identificados"],
+            "nao_encontrados": resultado["nao_encontrados"]
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "erro": str(e)
+        })
 
 
 @app.route("/preview", methods=["POST"])
@@ -403,27 +960,64 @@ def preview():
         pos_y = int(request.form.get("pos_y", 300))
         rotacao = int(request.form.get("rotacao", 90))
         fonte = int(request.form.get("fonte", 10))
+        texto_atleta = request.form.get("texto_atleta", "categoria")
+        escolas_selecionadas = request.form.getlist("escolas_selecionadas")
 
         pdf_preview = criar_pdf(
-            excel,
-            pdf,
-            pos_x,
-            pos_y,
-            rotacao,
-            fonte,
+            excel_file=excel,
+            pdf_file=pdf,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            rotacao=rotacao,
+            fonte=fonte,
+            somente_primeira_pagina=True,
+            texto_atleta=texto_atleta,
+            escolas_selecionadas=escolas_selecionadas
+        )
+
+        doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
+        page = doc[0]
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+        img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+        doc.close()
+
+        return jsonify({
+            "ok": True,
+            "imagem": f"data:image/png;base64,{img_base64}"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "erro": str(e)
+        })
+
+
+@app.route("/preview-manual", methods=["POST"])
+def preview_manual():
+    try:
+        pdf = request.files["pdf_manual"]
+
+        texto_manual = request.form.get("texto_manual", "")
+        pos_x = int(request.form.get("pos_x_manual", 118))
+        pos_y = int(request.form.get("pos_y_manual", 300))
+        rotacao = int(request.form.get("rotacao_manual", 90))
+        fonte = int(request.form.get("fonte_manual", 10))
+
+        pdf_preview = criar_pdf_manual(
+            pdf_file=pdf,
+            texto_manual=texto_manual,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            rotacao=rotacao,
+            fonte=fonte,
             somente_primeira_pagina=True
         )
 
         doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
         page = doc[0]
-
-        zoom = 1.2
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-
-        img_bytes = pix.tobytes("png")
-        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+        img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         doc.close()
 
         return jsonify({
@@ -448,365 +1042,162 @@ def gerar():
         pos_y = int(request.form.get("pos_y", 300))
         rotacao = int(request.form.get("rotacao", 90))
         fonte = int(request.form.get("fonte", 10))
+        texto_atleta = request.form.get("texto_atleta", "categoria")
+        escolas_selecionadas = request.form.getlist("escolas_selecionadas")
 
         output = criar_pdf(
-            excel,
-            pdf,
-            pos_x,
-            pos_y,
-            rotacao,
-            fonte,
+            excel_file=excel,
+            pdf_file=pdf,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            rotacao=rotacao,
+            fonte=fonte,
+            somente_primeira_pagina=False,
+            texto_atleta=texto_atleta,
+            escolas_selecionadas=escolas_selecionadas
+        )
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="crachas_filtrados_por_escola.pdf",
+            mimetype="application/pdf"
+        )
+
+    except Exception as e:
+        return f"""
+        <h1>Erro ao gerar PDF</h1>
+        <pre>{h(e)}</pre>
+        <a href="/">Voltar</a>
+        """
+
+
+@app.route("/gerar-manual", methods=["POST"])
+def gerar_manual():
+    try:
+        pdf = request.files["pdf_manual"]
+
+        texto_manual = request.form.get("texto_manual", "")
+        pos_x = int(request.form.get("pos_x_manual", 118))
+        pos_y = int(request.form.get("pos_y_manual", 300))
+        rotacao = int(request.form.get("rotacao_manual", 90))
+        fonte = int(request.form.get("fonte_manual", 10))
+
+        output = criar_pdf_manual(
+            pdf_file=pdf,
+            texto_manual=texto_manual,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            rotacao=rotacao,
+            fonte=fonte,
             somente_primeira_pagina=False
         )
 
         return send_file(
             output,
             as_attachment=True,
-            download_name="crachas_final.pdf",
+            download_name="crachas_texto_manual.pdf",
             mimetype="application/pdf"
         )
 
     except Exception as e:
-        return f"Erro ao gerar PDF:<br><pre>{e}</pre>"
+        return f"""
+        <h1>Erro ao gerar PDF manual</h1>
+        <pre>{h(e)}</pre>
+        <a href="/">Voltar</a>
+        """
 
 
-# =========================
-# VALIDAÇÃO DA BASE
-# =========================
+@app.route("/gerar-excel-credenciais", methods=["GET", "POST"])
+def gerar_excel_credenciais():
+    if request.method == "GET":
+        return redirect("/")
 
-@app.route("/validar-base", methods=["POST"])
-def validar_base():
     try:
         excel = request.files["excel"]
         pdf = request.files["pdf"]
+        escolas_selecionadas = request.form.getlist("escolas_selecionadas")
+        escolas_escolhidas = normalizar_lista_escolas(escolas_selecionadas)
 
-        base, erros = montar_base_validacao(excel, pdf)
+        dados = carregar_planilha(excel)
+        df = dados["df"]
+        col_nome = dados["col_nome"]
+        col_cpf = dados["col_cpf"]
+        col_escola = dados["col_escola"]
 
-        html = """
-        <html>
-        <head>
-            <title>Base de Validação</title>
-            <style>
-                body { font-family: Arial; padding: 20px; }
-                table { border-collapse: collapse; width: 100%; margin-bottom: 25px; }
-                th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-                th { background: #111827; color: white; }
-                .erro { color: red; font-weight: bold; }
-                .ok { color: green; font-weight: bold; }
-            </style>
-        </head>
-        <body>
-        """
+        if not col_cpf:
+            raise Exception("Não encontrei a coluna CPF na planilha.")
 
-        html += "<h1>Base de Validação dos Crachás</h1>"
-        html += f"<p class='ok'>Atletas encontrados: {len(base)}</p>"
+        pdf_bytes = pdf.read()
+        reader = PdfReader(io.BytesIO(pdf_bytes))
 
-        html += "<table>"
-        html += "<tr><th>Página</th><th>Código QR</th><th>Nome</th><th>Categoria</th><th>Escola</th><th>Link</th></tr>"
+        registros = []
 
-        for item in base:
-            codigo = item["codigo_qr"]
-            html += f"""
-            <tr>
-                <td>{item['pagina']}</td>
-                <td>{codigo}</td>
-                <td>{item['nome']}</td>
-                <td>{item['categoria']}</td>
-                <td>{item['escola']}</td>
-                <td><a href="/atleta/{codigo}" target="_blank">Abrir</a></td>
-            </tr>
-            """
+        for i, page in enumerate(reader.pages):
+            texto_pypdf = page.extract_text() or ""
+            texto_fitz = texto_pagina_fitz(pdf_bytes, i)
+            texto_pagina = texto_pypdf + "\n" + texto_fitz
 
-        html += "</table>"
+            numero_credencial = extrair_numero_credencial(texto_pagina)
 
-        if erros:
-            html += f"<h2 class='erro'>Erros encontrados: {len(erros)}</h2>"
-            html += "<table>"
-            html += "<tr><th>Página</th><th>Código QR</th><th>Erro</th></tr>"
+            cpf = ""
+            escola = ""
+            nome = ""
 
-            for erro in erros:
-                html += f"""
-                <tr>
-                    <td>{erro['pagina']}</td>
-                    <td>{erro['codigo_qr']}</td>
-                    <td>{erro['erro']}</td>
-                </tr>
-                """
+            idx_excel, row = buscar_linha_por_nome(df, texto_pagina, col_nome)
 
-            html += "</table>"
+            if row is not None:
+                cpf = valor_linha(row, col_cpf, "")
+                escola = valor_linha(row, col_escola, "")
+                nome = valor_linha(row, col_nome, "")
 
-        html += """
-            <p><a href="/painel">Ir para o painel de check-in</a></p>
-        </body>
-        </html>
-        """
+                if not escola_permitida(escola, escolas_escolhidas):
+                    continue
 
-        return html
+            registros.append({
+                "NOME": nome,
+                "ESCOLA": escola,
+                "CPF": cpf,
+                "NUMERO_CREDENCIAL": numero_credencial
+            })
+
+        if not registros:
+            raise Exception("Nenhuma credencial encontrada para as escolas selecionadas.")
+
+        df_saida = pd.DataFrame(registros, columns=[
+            "NOME",
+            "ESCOLA",
+            "CPF",
+            "NUMERO_CREDENCIAL"
+        ])
+
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_saida.to_excel(writer, index=False, sheet_name="Credenciais")
+
+            ws = writer.sheets["Credenciais"]
+            ws.column_dimensions["A"].width = 35
+            ws.column_dimensions["B"].width = 45
+            ws.column_dimensions["C"].width = 22
+            ws.column_dimensions["D"].width = 25
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="credenciais_filtradas_por_escola.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     except Exception as e:
-        return f"Erro ao validar base:<br><pre>{e}</pre>"
-
-
-# =========================
-# TELA DO ATLETA / CHECK-IN
-# =========================
-
-@app.route("/atleta/<codigo_qr>")
-def atleta(codigo_qr):
-    atleta = buscar_atleta_por_codigo(codigo_qr)
-
-    if not atleta:
         return f"""
-        <html>
-        <head>
-            <title>Atleta não encontrado</title>
-            <style>
-                body {{
-                    font-family: Arial;
-                    background: #111827;
-                    color: white;
-                    text-align: center;
-                    padding: 40px;
-                }}
-                .card {{
-                    background: #1f2937;
-                    padding: 30px;
-                    border-radius: 16px;
-                    max-width: 500px;
-                    margin: auto;
-                }}
-                .erro {{ color: #ef4444; font-size: 28px; font-weight: bold; }}
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <div class="erro">ATLETA NÃO ENCONTRADO</div>
-                <p>Código lido: {codigo_qr}</p>
-            </div>
-        </body>
-        </html>
+        <h1>Erro ao gerar Excel de credenciais</h1>
+        <pre>{h(e)}</pre>
+        <a href="/">Voltar</a>
         """
-
-    status = atleta["status"]
-
-    cor = "#22c55e" if status == "PENDENTE" else "#f59e0b"
-    texto_status = "LIBERADO PARA ENTRAR" if status == "PENDENTE" else "JÁ ENTROU"
-
-    botao = ""
-
-    if status == "PENDENTE":
-        botao = f"""
-        <form action="/checkin/{codigo_qr}" method="POST">
-            <button type="submit">CONFIRMAR ENTRADA</button>
-        </form>
-        """
-    else:
-        botao = f"<p>Entrada registrada em: <strong>{atleta['checkin_hora']}</strong></p>"
-
-    return f"""
-    <html>
-    <head>
-        <title>{atleta['nome']}</title>
-        <style>
-            body {{
-                font-family: Arial;
-                background: #111827;
-                color: white;
-                text-align: center;
-                padding: 30px;
-            }}
-            .card {{
-                background: #1f2937;
-                padding: 30px;
-                border-radius: 18px;
-                max-width: 520px;
-                margin: auto;
-                box-shadow: 0 10px 30px rgba(0,0,0,.35);
-            }}
-            h1 {{
-                font-size: 28px;
-                margin-bottom: 10px;
-            }}
-            .categoria {{
-                font-size: 22px;
-                font-weight: bold;
-                margin: 20px 0;
-            }}
-            .status {{
-                background: {cor};
-                color: #111827;
-                padding: 14px;
-                border-radius: 12px;
-                font-size: 22px;
-                font-weight: bold;
-                margin: 20px 0;
-            }}
-            button {{
-                background: #22c55e;
-                border: 0;
-                padding: 16px 28px;
-                border-radius: 12px;
-                font-size: 20px;
-                font-weight: bold;
-                cursor: pointer;
-            }}
-            a {{
-                color: #93c5fd;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>{atleta['nome']}</h1>
-            <p>Código QR: <strong>{atleta['codigo_qr']}</strong></p>
-            <p>Escola: <strong>{atleta['escola']}</strong></p>
-            <p>Página do crachá: <strong>{atleta['pagina']}</strong></p>
-
-            <div class="categoria">{atleta['categoria']}</div>
-            <div class="status">{texto_status}</div>
-
-            {botao}
-
-            <p style="margin-top: 25px;">
-                <a href="/painel">Ver painel</a>
-            </p>
-        </div>
-    </body>
-    </html>
-    """
-
-
-@app.route("/checkin/<codigo_qr>", methods=["POST"])
-def checkin(codigo_qr):
-    registrar_checkin(codigo_qr)
-    return redirect(f"/atleta/{codigo_qr}")
-
-
-# =========================
-# PAINEL
-# =========================
-
-@app.route("/painel")
-def painel():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) as total FROM atletas")
-    total = cur.fetchone()["total"]
-
-    cur.execute("SELECT COUNT(*) as total FROM atletas WHERE status = 'ENTROU'")
-    entrou = cur.fetchone()["total"]
-
-    cur.execute("SELECT COUNT(*) as total FROM atletas WHERE status = 'PENDENTE'")
-    pendente = cur.fetchone()["total"]
-
-    cur.execute("SELECT * FROM atletas ORDER BY nome")
-    atletas = cur.fetchall()
-
-    conn.close()
-
-    html = f"""
-    <html>
-    <head>
-        <title>Painel de Check-in</title>
-        <style>
-            body {{ font-family: Arial; padding: 20px; background: #f3f4f6; }}
-            .cards {{ display: flex; gap: 15px; margin-bottom: 20px; }}
-            .card {{
-                background: white;
-                padding: 18px;
-                border-radius: 14px;
-                box-shadow: 0 4px 12px rgba(0,0,0,.08);
-                flex: 1;
-            }}
-            .num {{ font-size: 32px; font-weight: bold; }}
-            table {{ border-collapse: collapse; width: 100%; background: white; }}
-            th, td {{ border: 1px solid #ddd; padding: 8px; }}
-            th {{ background: #111827; color: white; }}
-            .entrou {{ color: #16a34a; font-weight: bold; }}
-            .pendente {{ color: #dc2626; font-weight: bold; }}
-            input {{
-                padding: 12px;
-                font-size: 18px;
-                width: 280px;
-                margin-bottom: 15px;
-            }}
-            button {{
-                padding: 12px 18px;
-                font-size: 18px;
-                cursor: pointer;
-            }}
-        </style>
-    </head>
-    <body>
-        <h1>Painel de Check-in</h1>
-
-        <form onsubmit="event.preventDefault(); irAtleta();">
-            <input id="codigo" placeholder="Digite ou escaneie o código QR" autofocus>
-            <button type="submit">Buscar</button>
-        </form>
-
-        <script>
-            function irAtleta() {{
-                const codigo = document.getElementById("codigo").value.trim();
-                if (codigo) {{
-                    window.location.href = "/atleta/" + codigo;
-                }}
-            }}
-        </script>
-
-        <div class="cards">
-            <div class="card">
-                <div>Total</div>
-                <div class="num">{total}</div>
-            </div>
-            <div class="card">
-                <div>Entraram</div>
-                <div class="num">{entrou}</div>
-            </div>
-            <div class="card">
-                <div>Pendentes</div>
-                <div class="num">{pendente}</div>
-            </div>
-        </div>
-
-        <table>
-            <tr>
-                <th>Código QR</th>
-                <th>Nome</th>
-                <th>Categoria</th>
-                <th>Escola</th>
-                <th>Status</th>
-                <th>Hora</th>
-                <th>Abrir</th>
-            </tr>
-    """
-
-    for a in atletas:
-        classe = "entrou" if a["status"] == "ENTROU" else "pendente"
-
-        html += f"""
-        <tr>
-            <td>{a['codigo_qr']}</td>
-            <td>{a['nome']}</td>
-            <td>{a['categoria']}</td>
-            <td>{a['escola']}</td>
-            <td class="{classe}">{a['status']}</td>
-            <td>{a['checkin_hora'] or ''}</td>
-            <td><a href="/atleta/{a['codigo_qr']}" target="_blank">Abrir</a></td>
-        </tr>
-        """
-
-    html += """
-        </table>
-    </body>
-    </html>
-    """
-
-    return html
 
 
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True, host="0.0.0.0", port=5000)
