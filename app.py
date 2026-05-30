@@ -842,7 +842,7 @@ def layout_home():
 
                     <div id="areaEscolas" class="escolas-box" style="display:none;"></div>
 
-                    <button type="button" class="secondary" onclick="preview()">Pré-visualizar primeira página selecionada</button>
+                    <button type="button" class="secondary" onclick="preview()">Baixar PDF teste da primeira página</button>
                     <button type="submit">Gerar PDF Final</button>
                     <button type="button" class="orange" onclick="exportarCredenciais()">Exportar Excel CPF + Credencial</button>
                 </form>
@@ -885,15 +885,15 @@ def layout_home():
                         </div>
                     </div>
 
-                    <button type="button" class="purple" onclick="previewManual()">Pré-visualizar modo manual</button>
+                    <button type="button" class="purple" onclick="previewManual()">Baixar PDF teste manual</button>
                     <button type="submit" class="orange">Gerar PDF Manual</button>
                 </form>
             </div>
 
             <div class="card">
-                <h2>Pré-visualização</h2>
+                <h2>Teste</h2>
                 <div id="preview" class="preview-box">
-                    A prévia aparecerá aqui.
+                    Clique no botão de teste para baixar somente a primeira página em PDF.
                 </div>
             </div>
         </div>
@@ -964,54 +964,34 @@ def layout_home():
                 }
             }
 
-            async function preview() {
+            function preview() {
                 const form = getForm();
-                const dados = new FormData(form);
-                const area = getPreview();
+                const actionOriginal = form.action;
+                const targetOriginal = form.target;
 
-                area.innerHTML = "Gerando prévia...";
+                getPreview().innerHTML = '<div class="ok">Baixando PDF teste da primeira página...</div>';
 
-                try {
-                    const resp = await fetch("/preview", {
-                        method: "POST",
-                        body: dados
-                    });
+                form.action = "/teste-primeira-pagina";
+                form.target = "_blank";
+                form.submit();
 
-                    const data = await resp.json();
-
-                    if (data.ok) {
-                        area.innerHTML = '<img src="' + data.imagem + '">';
-                    } else {
-                        area.innerHTML = '<div class="erro">' + data.erro + '</div>';
-                    }
-                } catch (e) {
-                    area.innerHTML = '<div class="erro">Erro ao gerar prévia.</div>';
-                }
+                form.action = actionOriginal || "/gerar";
+                form.target = targetOriginal || "";
             }
 
-            async function previewManual() {
+            function previewManual() {
                 const form = document.getElementById("formManual");
-                const dados = new FormData(form);
-                const area = getPreview();
+                const actionOriginal = form.action;
+                const targetOriginal = form.target;
 
-                area.innerHTML = "Gerando prévia manual...";
+                getPreview().innerHTML = '<div class="ok">Baixando PDF teste manual da primeira página...</div>';
 
-                try {
-                    const resp = await fetch("/preview-manual", {
-                        method: "POST",
-                        body: dados
-                    });
+                form.action = "/teste-manual-primeira-pagina";
+                form.target = "_blank";
+                form.submit();
 
-                    const data = await resp.json();
-
-                    if (data.ok) {
-                        area.innerHTML = '<img src="' + data.imagem + '">';
-                    } else {
-                        area.innerHTML = '<div class="erro">' + data.erro + '</div>';
-                    }
-                } catch (e) {
-                    area.innerHTML = '<div class="erro">Erro ao gerar prévia manual.</div>';
-                }
+                form.action = actionOriginal || "/gerar-manual";
+                form.target = targetOriginal || "";
             }
 
             function exportarCredenciais() {
@@ -1054,8 +1034,8 @@ def analisar_escolas():
         })
 
 
-@app.route("/preview", methods=["POST"])
-def preview():
+@app.route("/teste-primeira-pagina", methods=["POST"])
+def teste_primeira_pagina():
     try:
         excel = request.files["excel"]
         pdf = request.files["pdf"]
@@ -1073,8 +1053,7 @@ def preview():
         texto_atleta = request.form.get("texto_atleta", "categoria")
         escolas_selecionadas = request.form.getlist("escolas_selecionadas")
 
-        # Prévia otimizada para não estourar memória no Render Free
-        pdf_preview = criar_pdf_preview_rapido(
+        output = criar_pdf_preview_rapido(
             excel_file=excel,
             pdf_file=pdf,
             pos_x=pos_x,
@@ -1085,31 +1064,28 @@ def preview():
             escolas_selecionadas=escolas_selecionadas
         )
 
-        doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
-        page = doc[0]
-
-        # Prévia bem leve para Render Free. Não altera o PDF final.
-        pix = page.get_pixmap(matrix=fitz.Matrix(0.35, 0.35), alpha=False)
-
-        img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-        doc.close()
-
-        return jsonify({
-            "ok": True,
-            "imagem": f"data:image/png;base64,{img_base64}"
-        })
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="TESTE_primeira_pagina.pdf",
+            mimetype="application/pdf"
+        )
 
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "erro": str(e)
-        }), 200
+        return f"""
+        <h1>Erro ao gerar PDF teste</h1>
+        <pre>{h(e)}</pre>
+        <a href="/">Voltar</a>
+        """
 
 
-@app.route("/preview-manual", methods=["POST"])
-def preview_manual():
+@app.route("/teste-manual-primeira-pagina", methods=["POST"])
+def teste_manual_primeira_pagina():
     try:
         pdf = request.files["pdf_manual"]
+
+        if not pdf or pdf.filename == "":
+            raise Exception("Selecione o PDF dos crachás.")
 
         texto_manual = request.form.get("texto_manual", "")
         pos_x = int(request.form.get("pos_x_manual", 118))
@@ -1117,7 +1093,7 @@ def preview_manual():
         rotacao = int(request.form.get("rotacao_manual", 90))
         fonte = int(request.form.get("fonte_manual", 10))
 
-        pdf_preview = criar_pdf_manual(
+        output = criar_pdf_manual(
             pdf_file=pdf,
             texto_manual=texto_manual,
             pos_x=pos_x,
@@ -1127,22 +1103,19 @@ def preview_manual():
             somente_primeira_pagina=True
         )
 
-        doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
-        page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(0.35, 0.35), alpha=False)
-        img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-        doc.close()
-
-        return jsonify({
-            "ok": True,
-            "imagem": f"data:image/png;base64,{img_base64}"
-        })
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="TESTE_manual_primeira_pagina.pdf",
+            mimetype="application/pdf"
+        )
 
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "erro": str(e)
-        }), 200
+        return f"""
+        <h1>Erro ao gerar PDF teste manual</h1>
+        <pre>{h(e)}</pre>
+        <a href="/">Voltar</a>
+        """
 
 
 @app.route("/gerar", methods=["POST"])
