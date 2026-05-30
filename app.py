@@ -479,6 +479,110 @@ def criar_pdf_manual(pdf_file, texto_manual, pos_x, pos_y, rotacao, fonte, somen
     return output
 
 
+
+def criar_pdf_preview_rapido(
+    excel_file,
+    pdf_file,
+    pos_x,
+    pos_y,
+    rotacao,
+    fonte,
+    texto_atleta="categoria",
+    escolas_selecionadas=None
+):
+    """
+    Prévia leve para Render Free.
+    Não varre o PDF inteiro e não fica comparando todas as linhas da planilha.
+    Usa somente a primeira página do PDF e uma linha da planilha.
+    Se tiver escola marcada, pega a primeira linha daquela escola.
+    """
+    dados = carregar_planilha(excel_file)
+
+    df = dados["df"]
+    col_nome = dados["col_nome"]
+    col_sexo = dados["col_sexo"]
+    col_data = dados["col_data"]
+    col_escola = dados["col_escola"]
+    col_funcao = dados["col_funcao"]
+    col_tipo_usuario = dados["col_tipo_usuario"]
+
+    escolas_escolhidas = normalizar_lista_escolas(escolas_selecionadas)
+
+    if df.empty:
+        raise Exception("A planilha está vazia.")
+
+    row = None
+    idx_excel = 0
+
+    if escolas_escolhidas:
+        for idx in range(len(df)):
+            r = df.iloc[idx]
+            escola = valor_linha(r, col_escola, "")
+            if escola_permitida(escola, escolas_escolhidas):
+                row = r
+                idx_excel = idx
+                break
+
+        if row is None:
+            raise Exception("Não encontrei pessoa na planilha para a escola selecionada.")
+    else:
+        row = df.iloc[0]
+        idx_excel = 0
+
+    pdf_bytes = pdf_file.read()
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if len(reader.pages) == 0:
+        raise Exception("O PDF não possui páginas.")
+
+    page = reader.pages[0]
+    linha_excel = idx_excel + 2
+
+    texto_cracha, tipo_pessoa, escola = montar_texto_cracha(
+        row=row,
+        col_nome=col_nome,
+        col_sexo=col_sexo,
+        col_data=col_data,
+        col_escola=col_escola,
+        col_funcao=col_funcao,
+        col_tipo_usuario=col_tipo_usuario,
+        linha_excel=linha_excel,
+        texto_pagina="",
+        texto_atleta=texto_atleta
+    )
+
+    packet = io.BytesIO()
+    largura = float(page.mediabox.width)
+    altura = float(page.mediabox.height)
+
+    can = canvas.Canvas(packet, pagesize=(largura, altura))
+    can.setFont("Helvetica-Bold", fonte)
+    can.setFillColorRGB(1, 1, 1)
+
+    can.saveState()
+    can.translate(pos_x, pos_y)
+    can.rotate(rotacao)
+    can.drawCentredString(0, 0, texto_cracha)
+    can.restoreState()
+
+    can.save()
+    packet.seek(0)
+
+    overlay = PdfReader(packet)
+
+    if len(overlay.pages) > 0:
+        page.merge_page(overlay.pages[0])
+
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    output = io.BytesIO()
+    writer.write(output)
+    output.seek(0)
+
+    return output
+
+
 def layout_home():
     return """
     <!doctype html>
@@ -956,6 +1060,12 @@ def preview():
         excel = request.files["excel"]
         pdf = request.files["pdf"]
 
+        if not excel or excel.filename == "":
+            raise Exception("Selecione a planilha Excel.")
+
+        if not pdf or pdf.filename == "":
+            raise Exception("Selecione o PDF dos crachás.")
+
         pos_x = int(request.form.get("pos_x", 118))
         pos_y = int(request.form.get("pos_y", 300))
         rotacao = int(request.form.get("rotacao", 90))
@@ -963,21 +1073,24 @@ def preview():
         texto_atleta = request.form.get("texto_atleta", "categoria")
         escolas_selecionadas = request.form.getlist("escolas_selecionadas")
 
-        pdf_preview = criar_pdf(
+        # Prévia otimizada para não estourar memória no Render Free
+        pdf_preview = criar_pdf_preview_rapido(
             excel_file=excel,
             pdf_file=pdf,
             pos_x=pos_x,
             pos_y=pos_y,
             rotacao=rotacao,
             fonte=fonte,
-            somente_primeira_pagina=True,
             texto_atleta=texto_atleta,
             escolas_selecionadas=escolas_selecionadas
         )
 
         doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
         page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+
+        # Baixa resolução para evitar SIGKILL / falta de memória
+        pix = page.get_pixmap(matrix=fitz.Matrix(0.65, 0.65), alpha=False)
+
         img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         doc.close()
 
@@ -990,7 +1103,7 @@ def preview():
         return jsonify({
             "ok": False,
             "erro": str(e)
-        })
+        }), 200
 
 
 @app.route("/preview-manual", methods=["POST"])
@@ -1016,7 +1129,7 @@ def preview_manual():
 
         doc = fitz.open(stream=pdf_preview.getvalue(), filetype="pdf")
         page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(0.65, 0.65), alpha=False)
         img_base64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         doc.close()
 
@@ -1029,7 +1142,7 @@ def preview_manual():
         return jsonify({
             "ok": False,
             "erro": str(e)
-        })
+        }), 200
 
 
 @app.route("/gerar", methods=["POST"])
