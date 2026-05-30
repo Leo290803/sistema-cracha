@@ -1,234 +1,164 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <title>Sistema de Crachá</title>
-
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f5f5f5;
-            margin: 0;
-            padding: 20px;
-        }
-
-        .container {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            align-items: flex-start;
-        }
-
-        .box {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            width: 380px;
-            box-shadow: 0 0 12px rgba(0,0,0,0.15);
-        }
-
-        .preview {
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            width: 650px;
-            min-height: 650px;
-            box-shadow: 0 0 12px rgba(0,0,0,0.15);
-            text-align: center;
-        }
-
-        h1, h2 {
-            text-align: center;
-        }
-
-        input {
-            margin: 8px 0;
-            padding: 6px;
-        }
-
-        input[type="file"] {
-            width: 95%;
-        }
-
-        input[type="range"] {
-            width: 95%;
-        }
-
-        button {
-            background: green;
-            color: white;
-            border: none;
-            padding: 12px 25px;
-            border-radius: 6px;
-            cursor: pointer;
-            margin-top: 20px;
-            font-weight: bold;
-            width: 100%;
-        }
-
-        button:hover {
-            background: darkgreen;
-        }
-
-        label {
-            font-weight: bold;
-        }
-
-        .linha {
-            margin-top: 15px;
-        }
-
-        #previewImg {
-            max-width: 100%;
-            border: 1px solid #ddd;
-            background: white;
-        }
-
-        #status {
-            color: gray;
-            margin-top: 10px;
-            text-align: center;
-        }
-
-        .valor {
-            color: blue;
-            font-size: 14px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gerador de Crachás</title>
+<style>
+body{font-family:Arial;background:#f3f4f6;margin:0}
+.top{background:#0f8f43;color:white;padding:20px;display:flex;justify-content:space-between;align-items:center}
+.top h2{margin:0}
+.top a{color:white;margin-left:10px;font-weight:bold;text-decoration:none}
+.wrap{max-width:1200px;margin:30px auto;display:grid;grid-template-columns:400px 1fr;gap:20px;padding:0 15px}
+.card{background:white;padding:24px;border-radius:16px;box-shadow:0 5px 20px #0002}
+label{font-weight:bold;display:block;margin-top:16px}
+input{width:100%;margin-top:6px;padding:8px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box}
+input[type=range]{accent-color:#16a34a;padding:0}
+button{width:100%;padding:15px;margin-top:20px;border:0;border-radius:10px;background:#16a34a;color:white;font-weight:bold;cursor:pointer}
+button:hover{opacity:.92}
+.btn-blue{background:#2563eb}
+.preview{min-height:560px;display:grid;place-items:center;border:1px solid #ddd;border-radius:14px;background:#f9fafb;text-align:center;color:#555;font-weight:bold;padding:12px}
+.preview img{max-width:100%}
+.links{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}
+.links a{text-align:center;background:#111827;color:white;text-decoration:none;padding:10px;border-radius:8px;font-weight:bold}
+.info{background:#ecfdf5;border:1px solid #bbf7d0;color:#14532d;padding:10px;border-radius:10px;font-size:13px;margin-top:12px}
+@media(max-width:900px){
+  .wrap{grid-template-columns:1fr}
+  .top{display:block;text-align:center}
+  .top div{margin-top:12px}
+}
+</style>
 </head>
 
 <body>
+<div class="top">
+  <h2>Sistema de Crachás</h2>
+  <div>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/scanner">Scanner</a>
+    <a href="/relatorio">Relatórios</a>
+  </div>
+</div>
 
-<div class="container">
+<div class="wrap">
+  <div class="card">
+    <h2>Gerar Crachás</h2>
 
-    <div class="box">
-        <h1>Gerar Crachás</h1>
+    <form id="formCrachas" action="/gerar" method="POST" enctype="multipart/form-data">
+      <label>Planilha Excel</label>
+      <input type="file" name="excel" id="excel" accept=".xlsx,.xls" required>
 
-        <form id="formCracha" action="/gerar" method="post" enctype="multipart/form-data">
+      <label>PDF Modelo</label>
+      <input type="file" name="pdf" id="pdf" accept=".pdf" required>
 
-            <p><b>Planilha Excel:</b></p>
-            <input type="file" name="excel" id="excel" accept=".xlsx" required>
+      <div class="info">
+        <strong>GERAR PDF FINAL:</strong> coloca a categoria no crachá.<br>
+        <strong>GERAR EXCEL COM CREDENCIAIS:</strong> exporta somente PAGINA_PDF, NUMERO_CREDENCIAL e CPF.
+      </div>
 
-            <p><b>PDF Modelo:</b></p>
-            <input type="file" name="pdf" id="pdf" accept=".pdf" required>
+      <label>Posição X: <span id="xv">118</span></label>
+      <input type="range" min="0" max="700" value="118" name="pos_x" id="pos_x">
 
-            <div class="linha">
-                <label>Posição X: <span id="valorX" class="valor">118</span></label><br>
-                <input type="range" name="pos_x" id="pos_x" min="0" max="800" value="118">
-            </div>
+      <label>Posição Y: <span id="yv">300</span></label>
+      <input type="range" min="0" max="700" value="300" name="pos_y" id="pos_y">
 
-            <div class="linha">
-                <label>Posição Y: <span id="valorY" class="valor">300</span></label><br>
-                <input type="range" name="pos_y" id="pos_y" min="0" max="800" value="300">
-            </div>
+      <label>Rotação: <span id="rv">90</span></label>
+      <input type="range" min="0" max="360" value="90" name="rotacao" id="rotacao">
 
-            <div class="linha">
-                <label>Rotação: <span id="valorRotacao" class="valor">90</span></label><br>
-                <input type="range" name="rotacao" id="rotacao" min="0" max="360" value="90">
-            </div>
+      <label>Fonte: <span id="fv">10</span></label>
+      <input type="range" min="6" max="30" value="10" name="fonte" id="fonte">
 
-            <div class="linha">
-                <label>Tamanho da fonte: <span id="valorFonte" class="valor">10</span></label><br>
-                <input type="range" name="fonte" id="fonte" min="6" max="30" value="10">
-            </div>
+      <button type="submit">GERAR PDF FINAL</button>
 
-            <button type="submit">GERAR PDF FINAL</button>
+      <button type="submit" formaction="/gerar-excel-credenciais" formmethod="POST" class="btn-blue">
+        GERAR EXCEL COM CREDENCIAIS
+      </button>
+    </form>
 
-        </form>
+    <p id="status" style="text-align:center;color:#666;font-weight:bold">
+      Selecione a planilha e o PDF.
+    </p>
 
-        <p id="status">Selecione a planilha e o PDF.</p>
+    <div class="links">
+      <a href="/painel">Painel</a>
+      <a href="/scanner">Scanner</a>
+      <a href="/relatorio">Relatório</a>
     </div>
+  </div>
 
-    <div class="preview">
-        <h2>Pré-visualização automática</h2>
-        <img id="previewImg" src="" alt="A pré-visualização aparecerá aqui">
-    </div>
-
+  <div class="card">
+    <h2>Pré-visualização</h2>
+    <div class="preview" id="preview">A pré-visualização aparecerá aqui.</div>
+  </div>
 </div>
 
 <script>
-    const form = document.getElementById("formCracha");
+const excel = document.getElementById('excel');
+const pdf = document.getElementById('pdf');
+const posX = document.getElementById('pos_x');
+const posY = document.getElementById('pos_y');
+const rot = document.getElementById('rotacao');
+const fonte = document.getElementById('fonte');
 
-    const excel = document.getElementById("excel");
-    const pdf = document.getElementById("pdf");
+const xv = document.getElementById('xv');
+const yv = document.getElementById('yv');
+const rv = document.getElementById('rv');
+const fv = document.getElementById('fv');
+const statusBox = document.getElementById('status');
+const previewBox = document.getElementById('preview');
 
-    const posX = document.getElementById("pos_x");
-    const posY = document.getElementById("pos_y");
-    const rotacao = document.getElementById("rotacao");
-    const fonte = document.getElementById("fonte");
+function vals(){
+  xv.textContent = posX.value;
+  yv.textContent = posY.value;
+  rv.textContent = rot.value;
+  fv.textContent = fonte.value;
+}
 
-    const valorX = document.getElementById("valorX");
-    const valorY = document.getElementById("valorY");
-    const valorRotacao = document.getElementById("valorRotacao");
-    const valorFonte = document.getElementById("valorFonte");
+async function preview(){
+  vals();
 
-    const statusTexto = document.getElementById("status");
-    const previewImg = document.getElementById("previewImg");
+  if(!excel.files.length || !pdf.files.length){
+    statusBox.textContent = 'Selecione a planilha e o PDF.';
+    return;
+  }
 
-    let timer = null;
+  statusBox.textContent = 'Gerando pré-visualização...';
 
-    function atualizarValores() {
-        valorX.innerText = posX.value;
-        valorY.innerText = posY.value;
-        valorRotacao.innerText = rotacao.value;
-        valorFonte.innerText = fonte.value;
+  let fd = new FormData();
+  fd.append('excel', excel.files[0]);
+  fd.append('pdf', pdf.files[0]);
+  fd.append('pos_x', posX.value);
+  fd.append('pos_y', posY.value);
+  fd.append('rotacao', rot.value);
+  fd.append('fonte', fonte.value);
+
+  try{
+    let r = await fetch('/preview', {
+      method: 'POST',
+      body: fd
+    });
+
+    let d = await r.json();
+
+    if(d.ok){
+      previewBox.innerHTML = '<img src="' + d.imagem + '">';
+      statusBox.textContent = 'Atualizado';
+    }else{
+      previewBox.innerHTML = 'Erro na pré-visualização:<br>' + d.erro;
+      statusBox.textContent = 'Erro na pré-visualização.';
     }
+  }catch(e){
+    previewBox.innerHTML = 'Erro ao conectar com o servidor.';
+    statusBox.textContent = 'Erro ao conectar com o servidor.';
+  }
+}
 
-    function agendarPreview() {
-        atualizarValores();
+[excel, pdf, posX, posY, rot, fonte].forEach(e => {
+  e.addEventListener('change', preview);
+  e.addEventListener('input', preview);
+});
 
-        clearTimeout(timer);
-        timer = setTimeout(gerarPreview, 500);
-    }
-
-    async function gerarPreview() {
-        if (!excel.files.length || !pdf.files.length) {
-            statusTexto.innerText = "Selecione a planilha e o PDF.";
-            return;
-        }
-
-        statusTexto.innerText = "Atualizando pré-visualização...";
-
-        const formData = new FormData();
-
-        formData.append("excel", excel.files[0]);
-        formData.append("pdf", pdf.files[0]);
-        formData.append("pos_x", posX.value);
-        formData.append("pos_y", posY.value);
-        formData.append("rotacao", rotacao.value);
-        formData.append("fonte", fonte.value);
-
-        try {
-            const resposta = await fetch("/preview", {
-                method: "POST",
-                body: formData
-            });
-
-            const dados = await resposta.json();
-
-            if (dados.ok) {
-                previewImg.src = dados.imagem;
-                statusTexto.innerText =
-                    `Atualizado | X: ${posX.value} | Y: ${posY.value} | Rotação: ${rotacao.value} | Fonte: ${fonte.value}`;
-            } else {
-                statusTexto.innerText = "Erro: " + dados.erro;
-            }
-
-        } catch (erro) {
-            statusTexto.innerText = "Erro ao gerar preview.";
-        }
-    }
-
-    excel.addEventListener("change", agendarPreview);
-    pdf.addEventListener("change", agendarPreview);
-
-    posX.addEventListener("input", agendarPreview);
-    posY.addEventListener("input", agendarPreview);
-    rotacao.addEventListener("input", agendarPreview);
-    fonte.addEventListener("input", agendarPreview);
-
-    atualizarValores();
+vals();
 </script>
-
 </body>
 </html>
